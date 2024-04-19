@@ -1,0 +1,132 @@
+---
+title: "6. Uncorrected logistic regressions (Li et al.)"
+output: html_notebook
+highlight: tango
+---
+___
+
+## Load dependencies
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(broom)
+library(knitr)
+library(doParallel)
+```
+
+
+## 1. Codebase for uncorrected logistic regressions
+```{r}
+residueList = c('A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 
+                'K', 'L', 'M','N', 'P', 'Q', 'R', 'S', 
+                'T', 'V', 'W', 'Y')
+
+# Perform logistic regression WIHTOUT phylogenetic corrections
+performLogistic <- function(temps, encodedResidue) {
+    uncorrected_fit <- glm(encodedResidue ~ temps, family = binomial)
+    return(uncorrected_fit)
+}
+
+
+# High level function to perform regressions on each MSA position
+# The first argument is the tibble with the group's data
+# The second argument is the index of the tibble
+
+#' Uncorrected logic regressions on each position group ident by temp
+#'
+#' \code{sum} performs uncorrected logistic regression on each 
+#' position group ident by temp
+#'
+#' @param df tibble in long form of position and temperature data
+#' @param index index of tibble (from group)
+#' @return long form tibble containing regression parameters and raw
+#' data, to be combined into a record of all positions and parameters.
+
+logisticRegressionsOnGroup <- function(df, index) {
+    position <- as.numeric(index) # this index is really the group value (position)
+    # The sliced entry is a factor, which we want to convert to a string
+    enzymeName <- as.character(df[1,]$Enzyme_Name) 
+    temps <- df$Temperature
+    output = NULL
+    
+    for (residue in residueList) {
+        # recode the concensus_residues for a given target AA
+        recodedName <- paste(residue, '_encoded')
+        
+        # The !! unquotes,  and := prevent "residue" from being treated like a column name. 
+        # See https://stackoverflow.com/questions/26003574/use-dynamic-variable-names-in-dplyr
+        recodedCol<-recode(df$Consensus_Residue, !!residue := 1, .default = 0) 
+
+        # perform logistic regressions using temperatures and binary encoded cols
+        logisticResults <- performLogistic(temps, recodedCol) 
+        
+        # append the results to the growing output
+        output <- bind_rows(output, outputNonCorrectedToDF(logisticResults, 
+                                                           enzymeName, position, residue))
+    }
+    return(output)
+}
+
+
+# General description
+#'
+#' \code{sum} terse description
+#'
+#' @param uncorrectedOutput
+#' @param enzName
+#' @param position
+#' @param residue
+#' @return return descripition
+outputNonCorrectedToDF <- function(uncorrectedOutput, enzName, position, residue) {
+    uncorrected_params <- tidy(uncorrectedOutput)
+    
+    # Tidy up uncorrected fit params
+    colnames(uncorrected_params)<- c('var', 'estimate', 'stderr', 'statistic', 'pval')
+    uncorrected_params$type<-'uncorrected'
+    uncorrected_params$alpha<-NaN
+    uncorrected_params$convergence<-NaN
+    
+    # Merge, append identifier columns
+    merged_FitdData <- uncorrected_params
+    merged_FitdData$Enzyme <- enzName
+    merged_FitdData$position <- position
+    merged_FitdData$residue <- residue
+    return(merged_FitdData)
+}
+```
+
+## 2. Read the list of summaries to fit
+```{r}
+inputRoot <- '/Users/varundeepakgudhe/Dr.Raffael_pipeline/exp_seed/'
+#outputRoot <- '/Users/varundeepakgudhe/Dr.Raffael_pipeline/exp_seed/UncorrectedLogisticRegression/'
+outputRoot <- '/Users/varundeepakgudhe/Dr.Raffael_pipeline/exp_seed/UncorrectedLogisticRegressionTrimmed/'
+
+#file.names <- list.files(path=inputRoot, pattern ="*.csv.bz2", full.names=TRUE) #Use this for multiple enzymes
+#file.names <- list.files(path=inputRoot, pattern ="*.csv", full.names=TRUE)#using this for single enzyme
+file.names <- list.files(path=inputRoot, pattern ="*trimmed_targets_summary.csv", full.names=TRUE)
+
+print(paste(length(file.names), " Enzyme summaries to process"))
+```
+
+### Set up parallel workers
+```{r}
+registerDoParallel(cores=22)
+print(paste(getDoParWorkers(), " cores as workers"))
+```
+
+## 3. Perform logistic regressions (~2h 45min)
+```{r message=FALSE, warning=FALSE}
+options(warn=-1)
+
+foreach(i=1:length(file.names)) %dopar% {
+    # read the csv
+    inputDF <- read.csv(file = file.names[i])
+    
+    # perform the analysis
+    dfResults <- inputDF  %>% group_by(Position) %>% group_modify(logisticRegressionsOnGroup)
+    
+    # export the result
+    enzymeName <- as.character(inputDF[1,]$Enzyme_Name)
+    write.csv(dfResults, paste(outputRoot, enzymeName, '.csv', sep=""))
+    gc()
+}
+```
